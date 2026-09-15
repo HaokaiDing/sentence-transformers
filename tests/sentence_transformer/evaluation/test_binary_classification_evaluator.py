@@ -8,7 +8,7 @@ import csv
 
 import numpy as np
 import pytest
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.sentence_transformer import evaluation
@@ -44,6 +44,76 @@ def test_BinaryClassificationEvaluator_find_best_accuracy_and_threshold() -> Non
     y_pred_labels = [1 if pred >= threshold else 0 for pred in y_pred_cosine]
     sklearn_acc = accuracy_score(y_true, y_pred_labels)
     assert np.abs(max_acc - sklearn_acc) < 1e-6
+
+
+@pytest.mark.parametrize("high_score_more_similar", [True, False])
+@pytest.mark.parametrize(
+    ("scores", "labels"),
+    [
+        pytest.param([0.5, 0.5], [1, 0], id="tied-positive-first"),
+        pytest.param([0.5, 0.5], [0, 1], id="tied-negative-first"),
+        pytest.param([0.9, 0.5, 0.5, 0.1], [1, 1, 0, 0], id="mixed-ties-positive-first"),
+        pytest.param([0.9, 0.5, 0.5, 0.1], [1, 0, 1, 0], id="mixed-ties-negative-first"),
+        pytest.param([0.9, 0.5, 0.1], [1, 1, 1], id="all-positive"),
+        pytest.param([0.9, 0.5, 0.1], [0, 0, 0], id="all-negative"),
+        pytest.param([0.5], [1], id="single-positive"),
+        pytest.param([0.5], [0], id="single-negative"),
+        pytest.param([0.9, 0.5, 0.1], [0, 0, 1], id="reversed-ranking"),
+        pytest.param([np.nextafter(np.float32(1.0), np.inf, dtype=np.float32), 1.0], [1, 0], id="adjacent-scores"),
+    ],
+)
+def test_BinaryClassificationEvaluator_best_threshold_matches_predictions(
+    high_score_more_similar, scores, labels
+) -> None:
+    scores = np.asarray(scores, dtype=np.float32)
+    labels = np.asarray(labels)
+    if not high_score_more_similar:
+        scores = -scores
+
+    def predict(threshold):
+        return scores >= threshold if high_score_more_similar else scores <= threshold
+
+    # Each distinct score represents an attainable partition, plus the threshold
+    # beyond every score that predicts no positives.
+    no_positives_threshold = (
+        np.nextafter(scores.max(), np.inf, dtype=scores.dtype)
+        if high_score_more_similar
+        else np.nextafter(scores.min(), -np.inf, dtype=scores.dtype)
+    )
+    candidate_thresholds = [*np.unique(scores), no_positives_threshold]
+    accuracy, accuracy_threshold = evaluation.BinaryClassificationEvaluator.find_best_acc_and_threshold(
+        scores, labels, high_score_more_similar
+    )
+    assert accuracy == pytest.approx(accuracy_score(labels, predict(accuracy_threshold)))
+    assert accuracy == pytest.approx(
+        max(accuracy_score(labels, predict(candidate)) for candidate in candidate_thresholds)
+    )
+
+    f1, precision, recall, f1_threshold = evaluation.BinaryClassificationEvaluator.find_best_f1_and_threshold(
+        scores, labels, high_score_more_similar
+    )
+    predictions = predict(f1_threshold)
+    assert f1 == pytest.approx(f1_score(labels, predictions, zero_division=0))
+    assert precision == pytest.approx(precision_score(labels, predictions, zero_division=0))
+    assert recall == pytest.approx(recall_score(labels, predictions, zero_division=0))
+    assert f1 == pytest.approx(
+        max(f1_score(labels, predict(candidate), zero_division=0) for candidate in candidate_thresholds)
+    )
+
+
+def test_BinaryClassificationEvaluator_threshold_with_integer_scores() -> None:
+    scores = np.array([3, 2, 1])
+    labels = np.array([1, 0, 0])
+    assert evaluation.BinaryClassificationEvaluator.find_best_acc_and_threshold(scores, labels, True) == (
+        1.0,
+        2.5,
+    )
+    assert evaluation.BinaryClassificationEvaluator.find_best_f1_and_threshold(scores, labels, True) == (
+        1.0,
+        1.0,
+        1.0,
+        2.5,
+    )
 
 
 @pytest.mark.parametrize("similarity_fn_name", ["euclidean", "manhattan"])
