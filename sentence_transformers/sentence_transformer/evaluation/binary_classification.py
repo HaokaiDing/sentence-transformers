@@ -347,7 +347,7 @@ class BinaryClassificationEvaluator(BaseEvaluator):
             acc = (positive_so_far + remaining_negatives) / len(labels)
             if acc > max_acc:
                 max_acc = acc
-                best_threshold = score if is_last else np.multiply(score + rows[i + 1][0], 0.5, dtype=score_dtype)
+                best_threshold = score if is_last else (score + rows[i + 1][0]) / 2
                 # A rounded midpoint must not include the next score group.
                 if not is_last and best_threshold == rows[i + 1][0]:
                     best_threshold = score
@@ -360,7 +360,6 @@ class BinaryClassificationEvaluator(BaseEvaluator):
 
         scores = np.asarray(scores)
         labels = np.asarray(labels)
-        score_dtype = np.result_type(scores.dtype, np.float16)
 
         rows = list(zip(scores, labels))
 
@@ -368,8 +367,6 @@ class BinaryClassificationEvaluator(BaseEvaluator):
 
         best_f1 = best_precision = best_recall = 0
         threshold = 0
-        if rows:
-            threshold = np.nextafter(rows[0][0], np.inf if high_score_more_similar else -np.inf, dtype=score_dtype)
         nextract = 0
         ncorrect = 0
         total_num_duplicates = sum(labels)
@@ -392,7 +389,7 @@ class BinaryClassificationEvaluator(BaseEvaluator):
                     best_f1 = f1
                     best_precision = precision
                     best_recall = recall
-                    threshold = score if is_last else np.multiply(score + rows[i + 1][0], 0.5, dtype=score_dtype)
+                    threshold = score if is_last else (score + rows[i + 1][0]) / 2
                     if not is_last and threshold == rows[i + 1][0]:
                         threshold = score
 
