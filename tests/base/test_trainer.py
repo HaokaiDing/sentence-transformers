@@ -187,6 +187,34 @@ def test_load_from_checkpoint_reloads_custom_module_classes(
     assert reload_kwargs["trust_remote_code"] is False
 
 
+@pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize("load_best_model", [False, True])
+def test_load_from_checkpoint_preserves_compiled_model(
+    stsb_bert_tiny_model: SentenceTransformer, tmp_path: Path, compiled: bool, load_best_model: bool
+) -> None:
+    model = stsb_bert_tiny_model
+    training_model = torch.compile(model, backend="eager") if compiled else model
+    args = SentenceTransformerTrainingArguments(output_dir=str(tmp_path / "out"), report_to=[])
+    trainer = SentenceTransformerTrainer(model=training_model, args=args)
+    checkpoint_folder = tmp_path / "checkpoint-1"
+    trainer._save(output_dir=str(checkpoint_folder))
+
+    weights = next(model.parameters())
+    original = weights.detach().clone()
+    with torch.no_grad():
+        weights.add_(1)
+
+    if load_best_model:
+        trainer.state.best_model_checkpoint = str(checkpoint_folder)
+        trainer._load_best_model()
+    else:
+        trainer._load_from_checkpoint(str(checkpoint_folder))
+
+    assert torch.equal(weights, original)
+    assert trainer.model is training_model
+    assert next(trainer.model.parameters()) is weights
+
+
 def test_track_loss_components_detaches_the_accumulated_values() -> None:
     """The component dict values carry the autograd graph and, for the Cached* losses, the
     gradient caches held by their backward hook. Accumulating them undetached would pin
@@ -207,6 +235,39 @@ def test_track_loss_components_detaches_the_accumulated_values() -> None:
     accumulated = trainer.accum_loss_components["train"]["base_loss"]
     assert accumulated.grad_fn is None and not accumulated.requires_grad
     assert accumulated.item() == pytest.approx(12.0)
+
+
+@pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize(
+    ("training", "num_calls", "global_step"),
+    [
+        (True, 4, 1),  # gradient accumulation: 4 loss calls, 1 optimizer step since the last log
+        (False, 99, 0),  # evaluation: 99 batches, no optimizer step since the last log
+    ],
+)
+def test_track_loss_components_replaces_nonfinite_with_the_running_mean(
+    training: bool, num_calls: int, global_step: int, nonfinite: float
+) -> None:
+    trainer = SimpleNamespace(
+        args=SimpleNamespace(logging_nan_inf_filter=True),
+        model=SimpleNamespace(training=training),
+        accum_loss_components={"train": {}, "eval": {}},
+        state=SimpleNamespace(global_step=global_step),
+        _globalstep_last_logged=0,
+    )
+    for value in range(1, num_calls + 1):
+        SentenceTransformerTrainer.track_loss_components(trainer, {"base_loss": torch.tensor(float(value))})
+    SentenceTransformerTrainer.track_loss_components(trainer, {"base_loss": torch.tensor(nonfinite)})
+
+    accum = trainer.accum_loss_components["train" if training else "eval"]
+    assert (accum["base_loss"] / accum["steps"]).item() == pytest.approx((num_calls + 1) / 2)
+
+    # log() resets the accumulators but retains their keys.
+    accum["base_loss"].zero_()
+    accum["steps"].zero_()
+    SentenceTransformerTrainer.track_loss_components(trainer, {"base_loss": torch.tensor(nonfinite)})
+    assert accum["base_loss"].item() == 0.0
+    assert accum["steps"].item() == 1
 
 
 def _run_ddp_evaluation_loop(
