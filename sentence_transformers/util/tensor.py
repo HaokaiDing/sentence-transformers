@@ -137,6 +137,9 @@ def normalize_embeddings(embeddings: Tensor) -> Tensor:
         normalized_values = torch.nn.functional.normalize(values, p=2, dim=0)
         return torch.sparse_coo_tensor(indices, normalized_values, embeddings.size())
 
+    if values.dtype in (torch.float16, torch.bfloat16):
+        values = values.float()
+
     # Compute row norms efficiently
     row_norms = values.new_zeros(embeddings.size(0))
     row_norms.index_add_(0, indices[0], values**2)
@@ -147,7 +150,7 @@ def normalize_embeddings(embeddings: Tensor) -> Tensor:
     normalized_values = values.clone()
     normalized_values[mask] /= row_norms[mask]
 
-    return torch.sparse_coo_tensor(indices, normalized_values, embeddings.size())
+    return torch.sparse_coo_tensor(indices, normalized_values.to(embeddings.dtype), embeddings.size())
 
 
 @overload

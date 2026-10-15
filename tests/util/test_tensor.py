@@ -79,14 +79,35 @@ def test_normalize_sparse_embeddings_preserves_dtype(dtype: torch.dtype, default
         torch.set_default_dtype(original_default_dtype)
 
 
-def test_normalize_sparse_embeddings_backward() -> None:
-    values = torch.tensor([3.0, 4.0, -4.0, 3.0], dtype=torch.float64, requires_grad=True)
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("ndim", [1, 2])
+@pytest.mark.parametrize(("size", "value"), [(4096, 1.0), (2, 300.0), (2, 1e-4)])
+def test_normalize_sparse_embeddings_half_precision(
+    device: str, dtype: torch.dtype, ndim: int, size: int, value: float
+) -> None:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    dense = torch.full((size,) if ndim == 1 else (1, size), value, dtype=dtype, device=device)
+    embeddings = dense.to_sparse()
+
+    normalized = normalize_embeddings(embeddings)
+
+    expected = torch.nn.functional.normalize(dense.double(), p=2, dim=-1).to(dtype)
+    assert normalized.is_sparse
+    torch.testing.assert_close(normalized.to_dense(), expected)
+    torch.testing.assert_close(embeddings.to_dense(), dense)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])
+def test_normalize_sparse_embeddings_backward(dtype: torch.dtype) -> None:
+    values = torch.tensor([3.0, 4.0, -4.0, 3.0], dtype=dtype, requires_grad=True)
     indices = torch.tensor([[0, 0, 2, 2], [0, 1, 0, 1]])
     embeddings = torch.sparse_coo_tensor(indices, values, (3, 2))
 
     normalize_embeddings(embeddings).to_dense().sum().backward()
 
-    expected = torch.tensor([0.032, -0.024, 0.168, 0.224], dtype=torch.float64)
+    expected = torch.tensor([0.032, -0.024, 0.168, 0.224], dtype=dtype)
     torch.testing.assert_close(values.grad, expected)
 
 
